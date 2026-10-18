@@ -1,0 +1,130 @@
+# =====================================================================
+#  MO HINH MANG CO DAY (Wired) - NS2 2.35
+#  Topo "dumbbell": 3 may gui -> R1 ==(nut co chai)== R2 -> 3 may nhan
+#
+#     n0 (FTP/TCP) --\                         /-- n5 (TCPSink)
+#     n1 (CBR video)---- R1(n3) ======= R2(n4) ---- n6 (Null)
+#     n2 (CBR VoIP) --/     bottleneck          \-- n7 (Null)
+#
+#  Cach chay:  ns wired.tcl [ten_tham_so gia_tri] ...
+#  VD:         ns wired.tcl bw 3Mb qlim 30 qtype RED out ../results/wired_x
+# =====================================================================
+
+# ---------------- Tham so dau vao (mac dinh = kich ban co so) --------
+array set opt {
+    bw        1.5Mb
+    delay     20ms
+    qlim      10
+    qtype     DropTail
+    acc_bw    10Mb
+    acc_delay 2ms
+    tcp       Agent/TCP
+    window    20
+    pktsize   1000
+    video     1Mb
+    voip_int  0.02
+    voip_size 160
+    stop      60.0
+    nam       0
+    out       ../results/wired_base
+}
+foreach {k v} $argv {
+    if {![info exists opt($k)]} { puts "Tham so khong hop le: $k"; exit 1 }
+    set opt($k) $v
+}
+puts "== WIRED: [array get opt]"
+
+set ns [new Simulator]
+$ns color 1 Blue
+$ns color 2 Red
+$ns color 3 Green
+
+set tf [open $opt(out).tr w]
+$ns trace-all $tf
+if {$opt(nam)} {
+    set nf [open $opt(out).nam w]
+    $ns namtrace-all $nf
+}
+
+# ---------------- Nut mang (8 node) ---------------------------------
+for {set i 0} {$i < 8} {incr i} { set n($i) [$ns node] }
+$n(3) shape box ;# R1
+$n(4) shape box ;# R2
+
+# ---------------- Lien ket ------------------------------------------
+# Truy nhap: 10Mb / 2ms / DropTail
+foreach s {0 1 2} { $ns duplex-link $n($s) $n(3) $opt(acc_bw) $opt(acc_delay) DropTail }
+foreach d {5 6 7} { $ns duplex-link $n(4) $n($d) $opt(acc_bw) $opt(acc_delay) DropTail }
+# Nut co chai R1-R2
+$ns duplex-link $n(3) $n(4) $opt(bw) $opt(delay) $opt(qtype)
+$ns queue-limit $n(3) $n(4) $opt(qlim)
+$ns queue-limit $n(4) $n(3) $opt(qlim)
+
+$ns duplex-link-op $n(0) $n(3) orient right-down
+$ns duplex-link-op $n(1) $n(3) orient right
+$ns duplex-link-op $n(2) $n(3) orient right-up
+$ns duplex-link-op $n(3) $n(4) orient right
+$ns duplex-link-op $n(4) $n(5) orient right-up
+$ns duplex-link-op $n(4) $n(6) orient right
+$ns duplex-link-op $n(4) $n(7) orient right-down
+$ns duplex-link-op $n(3) $n(4) queuePos 0.5
+
+# Theo doi hang doi nut co chai
+set qf [open $opt(out).queue w]
+set qmon [$ns monitor-queue $n(3) $n(4) $qf 0.1]
+[$ns link $n(3) $n(4)] queue-sample-timeout
+
+# ---------------- Luu luong -----------------------------------------
+# Luong 1: TCP + FTP  (n0 -> n5)
+set tcp [new $opt(tcp)]
+$tcp set fid_ 1
+$tcp set packetSize_ $opt(pktsize)
+$tcp set window_ $opt(window)
+$ns attach-agent $n(0) $tcp
+set sink [new Agent/TCPSink]
+$ns attach-agent $n(5) $sink
+$ns connect $tcp $sink
+set ftp [new Application/FTP]
+$ftp attach-agent $tcp
+
+# Luong 2: UDP + CBR "video" (n1 -> n6)
+set udp1 [new Agent/UDP]
+$udp1 set fid_ 2
+$ns attach-agent $n(1) $udp1
+set null1 [new Agent/Null]
+$ns attach-agent $n(6) $null1
+$ns connect $udp1 $null1
+set cbr1 [new Application/Traffic/CBR]
+$cbr1 attach-agent $udp1
+$cbr1 set packetSize_ $opt(pktsize)
+$cbr1 set rate_ $opt(video)
+
+# Luong 3: UDP + CBR "VoIP" G.711 (160B / 20ms = 64kbps) (n2 -> n7)
+set udp2 [new Agent/UDP]
+$udp2 set fid_ 3
+$ns attach-agent $n(2) $udp2
+set null2 [new Agent/Null]
+$ns attach-agent $n(7) $null2
+$ns connect $udp2 $null2
+set cbr2 [new Application/Traffic/CBR]
+$cbr2 attach-agent $udp2
+$cbr2 set packetSize_ $opt(voip_size)
+$cbr2 set interval_ $opt(voip_int)
+
+# ---------------- Lich su kien --------------------------------------
+$ns at 0.5 "$ftp start"
+$ns at 1.0 "$cbr1 start"
+$ns at 1.0 "$cbr2 start"
+$ns at [expr $opt(stop) - 1.0] "$cbr1 stop; $cbr2 stop"
+$ns at [expr $opt(stop) - 0.5] "$ftp stop"
+$ns at $opt(stop) "finish"
+
+proc finish {} {
+    global ns tf opt qf
+    $ns flush-trace
+    close $tf
+    close $qf
+    if {$opt(nam)} { global nf; close $nf }
+    exit 0
+}
+$ns run
